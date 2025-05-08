@@ -39,6 +39,13 @@ class ImageEditRequest(BaseModel):
     style: str = Field(default="natural", description="Image style (natural, vivid)")
     return_format: str = Field(default="url", description="Return format (url, base64)")
 
+class Base64ImageEditRequest(BaseModel):
+    image_data: str = Field(..., description="Base64 encoded image data")
+    prompt: str = Field(..., description="Text prompt describing the desired edits")
+    size: str = Field(default="1024x1024", description="Image size (1024x1024, 1024x1792, 1792x1024)")
+    quality: str = Field(default="high", description="Image quality (standard, high)")
+    return_format: str = Field(default="url", description="Return format (url, base64)")
+
 # Response models
 class Scene(BaseModel):
     scene_number: int
@@ -201,6 +208,62 @@ async def edit_image_endpoint(
         
         # If file was saved and user wants the file, return it
         if return_format == "file" and "saved_path" in result and os.path.exists(result["saved_path"]):
+            return FileResponse(
+                path=result["saved_path"],
+                media_type="image/png",
+                filename="edited_image.png"
+            )
+        
+        return result
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error editing image: {str(e)}")
+
+@router.post("/edit-image-base64", response_model=ImageEditResponse)
+async def edit_image_base64_endpoint(request: Base64ImageEditRequest):
+    """
+    Edit an image using OpenAI's image editing API with base64 encoded image data.
+    
+    This endpoint allows you to edit an image based on a text prompt using base64 encoded image data.
+    Designed for integration with n8n workflows where you have base64 image data.
+    """
+    try:
+        # Create temporary directory if it doesn't exist
+        os.makedirs("temp", exist_ok=True)
+        
+        # Decode base64 data and save to temporary file
+        try:
+            image_data = base64.b64decode(request.image_data)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid base64 image data: {str(e)}")
+        
+        # Save decoded image to temporary file
+        temp_image_path = f"temp/{uuid.uuid4()}.png"
+        with open(temp_image_path, "wb") as f:
+            f.write(image_data)
+        
+        # Generate output path
+        output_path = f"temp/output_{uuid.uuid4()}.png"
+        
+        # Call the image editor
+        result = edit_image(
+            image_file=temp_image_path,
+            prompt=request.prompt,
+            size=request.size,
+            quality=request.quality,
+            save_path=output_path 
+        )
+        
+        # Clean up temporary files
+        # if os.path.exists(temp_image_path):
+        #     os.remove(temp_image_path)
+        
+        # Return appropriate response
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+        
+        # If file was saved and user wants the file, return it
+        if request.return_format == "file" and "saved_path" in result and os.path.exists(result["saved_path"]):
             return FileResponse(
                 path=result["saved_path"],
                 media_type="image/png",

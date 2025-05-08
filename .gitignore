@@ -1,3 +1,65 @@
 /.env
 /__pycache__
 /venv
+/temp
+
+# Ignore system files
+.DS_Store
+Thumbs.db
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore Node.js dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Ignore environment files
+.env
+.env.local
+.env.development
+.env.production
+
+# Ignore logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Ignore compiled files
+dist/
+build/
+out/
+coverage/
+*.o
+*.obj
+*.exe
+*.class
+
+# Ignore IDE/editor-specific files
+.vscode/
+.idea/
+*.iml
+
+# Ignore Git-related files
+.git/
+.gitignore
+
+# Ignore macOS system files
+*.DS_Store
+
+# Ignore package manager lock files (if not needed)
+package-lock.json
+yarn.lock
+firebase-credentials.json
+# Ignore virtual environments (Python)
+venv/
+.env/
+token.json
+credentials.json
+json_output/
