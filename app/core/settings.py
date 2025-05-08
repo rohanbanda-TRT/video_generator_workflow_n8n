@@ -11,6 +11,9 @@ class Settings(BaseModel):
     # API Keys
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_API_KEY_TPN: str = os.getenv("OPENAI_API_KEY_TPN", "")
+    RUNWAY_API_KEY: str = os.getenv("RUNWAY_API_KEY", "")
+    RUNWAY_API_VERSION: str = os.getenv("RUNWAY_API_VERSION", "2024-11-06")
+    RUNWAY_API_BASE_URL: str = os.getenv("RUNWAY_API_BASE_URL", "https://api.dev.runwayml.com")
     
     # Model settings
     DEFAULT_MODEL: str = "gpt-4o-mini"

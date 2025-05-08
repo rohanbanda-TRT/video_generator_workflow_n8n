@@ -15,6 +15,7 @@ from app.agents.script_writer_agent import script_writer_agent
 from app.utils.image_editor import edit_image
 from app.utils.image_processor import process_scene_image, download_image_from_url
 from app.core.settings import settings
+import httpx
 
 # Create router
 router = APIRouter(prefix="/api", tags=["script-generator"])
@@ -45,6 +46,18 @@ class Base64ImageEditRequest(BaseModel):
     size: str = Field(default="1024x1024", description="Image size (1024x1024, 1024x1792, 1792x1024)")
     quality: str = Field(default="high", description="Image quality (standard, high)")
     return_format: str = Field(default="url", description="Return format (url, base64)")
+
+class RunwayMLRequest(BaseModel):
+    image_data: str = Field(..., description="Base64 encoded image data")
+    prompt: str = Field(..., description="Text prompt for image generation", alias="promptText")
+    model_id: str = Field(default="gen4_turbo", description="RunwayML model ID", alias="model")
+    params: Optional[Dict[str, Any]] = Field(default=None, description="Additional model parameters")
+
+class RunwayTaskRequest(BaseModel):
+    task_id: str = Field(..., description="RunwayML task ID to check status")
+
+class RunwayVideoDownloadRequest(BaseModel):
+    task_id: str = Field(..., description="RunwayML task ID to download video from")
 
 # Response models
 class Scene(BaseModel):
@@ -93,6 +106,27 @@ class SceneImageResponse(BaseModel):
     scene_number: Optional[int] = None
     prompt: Optional[str] = None
     image_data: Optional[str] = None  # Base64 encoded image data
+    error: Optional[str] = None
+
+class RunwayMLResponse(BaseModel):
+    success: bool
+    task_id: Optional[str] = None
+    result_url: Optional[str] = None
+    result_data: Optional[str] = None  # Base64 encoded result data
+    error: Optional[str] = None
+
+class RunwayTaskResponse(BaseModel):
+    success: bool
+    task_id: Optional[str] = None
+    status: Optional[str] = None
+    progress: Optional[float] = None
+    output: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+class RunwayVideoDownloadResponse(BaseModel):
+    success: bool
+    video_url: Optional[str] = None
+    video_data: Optional[str] = None  # Base64 encoded video data
     error: Optional[str] = None
 
 @router.post("/script", response_model=ScriptResponse)
@@ -325,6 +359,239 @@ async def scene_image_endpoint(request: SceneImageRequest):
         return {
             "success": False,
             "error": f"Error processing scene image: {str(e)}"
+        }
+
+
+@router.post("/runway-generate", response_model=RunwayMLResponse)
+async def runway_generate_endpoint(request: RunwayMLRequest):
+    """
+    Generate content using RunwayML API.
+    
+    This endpoint sends a request to the RunwayML API with an image and text prompt
+    to generate new content based on the specified model.
+    
+    Designed for integration with n8n workflows.
+    """
+    try:
+        # Get API key from settings
+        api_key = settings.RUNWAY_API_KEY
+        if not api_key:
+            raise HTTPException(status_code=500, detail="RunwayML API key not configured")
+        
+        # Prepare the request payload
+        payload = {
+            "promptImage": f"data:image/png;base64,{request.image_data}" if not request.image_data.startswith("data:") else request.image_data,
+            "prompt": request.prompt
+        }
+        
+        # Add additional parameters if provided
+        if request.params:
+            payload.update(request.params)
+        
+        # Set up headers
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-Runway-Version": settings.RUNWAY_API_VERSION,
+            "User-Agent": "RunwayML API/1.0"
+        }
+        
+        # Make the API request
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                f"{settings.RUNWAY_API_BASE_URL}/v1/image_to_video",
+                json={
+                    "promptImage": f"data:image/png;base64,{request.image_data}" if not request.image_data.startswith("data:") else request.image_data,
+                    "promptText": request.prompt,
+                    "model": request.model_id,
+                    "duration": 5,
+                    "ratio": "1280:720"
+                },
+                headers=headers
+            )
+            
+            # Check for errors
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"RunwayML API error: {response.status_code} - {response.text}"
+                }
+            
+            # Process the response
+            response_data = response.json()
+            
+            # Return the result
+            result = {
+                "success": True
+            }
+            
+            # Add task_id if present
+            if "taskId" in response_data:
+                result["task_id"] = response_data["taskId"]
+            
+            # Add URL or data based on what's in the response
+            if "url" in response_data:
+                result["result_url"] = response_data["url"]
+            if "data" in response_data:
+                result["result_data"] = response_data["data"]
+            
+            return result
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Error generating content with RunwayML: {str(e)}"
+        }
+
+@router.post("/runway-task-status", response_model=RunwayTaskResponse)
+async def runway_task_status_endpoint(request: RunwayTaskRequest):
+    """
+    Check the status of a RunwayML task.
+    
+    This endpoint checks the status of a task created by the RunwayML API.
+    It returns the current status, progress, and output if the task is complete.
+    
+    Designed for integration with n8n workflows.
+    """
+    try:
+        # Get API key from settings
+        api_key = settings.RUNWAY_API_KEY
+        if not api_key:
+            raise HTTPException(status_code=500, detail="RunwayML API key not configured")
+        
+        # Set up headers
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-Runway-Version": settings.RUNWAY_API_VERSION,
+            "User-Agent": "RunwayML API/1.0"
+        }
+        
+        # Make the API request
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{settings.RUNWAY_API_BASE_URL}/v1/tasks/{request.task_id}",
+                headers=headers
+            )
+            
+            # Check for errors
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"RunwayML API error: {response.status_code} - {response.text}"
+                }
+            
+            # Process the response
+            task_data = response.json()
+            
+            # Return the result
+            result = {
+                "success": True,
+                "task_id": request.task_id,
+                "status": task_data.get("status"),
+                "progress": task_data.get("progress")
+            }
+            
+            # Add output if available
+            if "output" in task_data:
+                result["output"] = task_data["output"]
+            
+            return result
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Error checking task status with RunwayML: {str(e)}"
+        }
+
+@router.post("/runway-download-video", response_model=RunwayVideoDownloadResponse)
+async def runway_download_video_endpoint(request: RunwayVideoDownloadRequest):
+    """
+    Download a video generated by RunwayML.
+    
+    This endpoint first checks the task status, and if complete, downloads the
+    generated video and returns it as a URL or base64 encoded data.
+    
+    Designed for integration with n8n workflows.
+    """
+    try:
+        # Get API key from settings
+        api_key = settings.RUNWAY_API_KEY
+        if not api_key:
+            raise HTTPException(status_code=500, detail="RunwayML API key not configured")
+        
+        # Set up headers
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "X-Runway-Version": settings.RUNWAY_API_VERSION,
+            "User-Agent": "RunwayML API/1.0"
+        }
+        
+        # First check the task status
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            status_response = await client.get(
+                f"{settings.RUNWAY_API_BASE_URL}/v1/tasks/{request.task_id}",
+                headers=headers
+            )
+            
+            # Check for errors
+            if status_response.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"RunwayML API error: {status_response.status_code} - {status_response.text}"
+                }
+            
+            # Process the response
+            task_data = status_response.json()
+            
+            # Check if the task is complete
+            if task_data.get("status") != "COMPLETED":
+                return {
+                    "success": False,
+                    "error": f"Task is not completed yet. Current status: {task_data.get('status')}"
+                }
+            
+            # Get the video URL from the output
+            if "output" not in task_data or "video" not in task_data["output"]:
+                return {
+                    "success": False,
+                    "error": "No video output found in the task data"
+                }
+            
+            video_url = task_data["output"]["video"]
+            
+            # Create temp directory if it doesn't exist
+            os.makedirs("temp", exist_ok=True)
+            
+            # Download the video
+            video_response = await client.get(video_url)
+            if video_response.status_code != 200:
+                return {
+                    "success": False,
+                    "error": f"Error downloading video: {video_response.status_code} - {video_response.text}"
+                }
+            
+            # Save the video to a temporary file
+            temp_video_path = f"temp/runway_video_{uuid.uuid4()}.mp4"
+            with open(temp_video_path, "wb") as f:
+                f.write(video_response.content)
+            
+            # Convert to base64 for the response
+            with open(temp_video_path, "rb") as f:
+                video_data = base64.b64encode(f.read()).decode("utf-8")
+            
+            # Return the result
+            return {
+                "success": True,
+                "video_url": video_url,
+                "video_data": video_data
+            }
+            
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Error downloading video from RunwayML: {str(e)}"
         }
 
 
