@@ -25,6 +25,8 @@ yarn-error.log
 .env.production
 
 # Ignore logs
+combined_generated_videos/
+downloaded_videos/
 logs/
 *.log
 npm-debug.log*

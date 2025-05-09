@@ -3,12 +3,14 @@ from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any, Optional
 import uuid
-import re
 import json
+import base64
+import httpx
 import os
 import requests
-import base64
+from fastapi.responses import FileResponse
 from bs4 import BeautifulSoup
+from app.utils.video_combiner import combine_videos_from_urls
 from langchain_core.messages import HumanMessage
 
 from app.agents.script_writer_agent import script_writer_agent
@@ -16,6 +18,7 @@ from app.utils.image_editor import edit_image
 from app.utils.image_processor import process_scene_image, download_image_from_url
 from app.core.settings import settings
 import httpx
+import re
 
 # Create router
 router = APIRouter(prefix="/api", tags=["script-generator"])
@@ -46,6 +49,7 @@ class Base64ImageEditRequest(BaseModel):
     size: str = Field(default="1024x1024", description="Image size (1024x1024, 1024x1792, 1792x1024)")
     quality: str = Field(default="high", description="Image quality (standard, high)")
     return_format: str = Field(default="url", description="Return format (url, base64)")
+    video_prompt: Optional[str] = Field(default=None, description="Video prompt for image editing")
 
 class RunwayMLRequest(BaseModel):
     image_data: str = Field(..., description="Base64 encoded image data")
@@ -92,12 +96,14 @@ class ImageEditResponse(BaseModel):
     url: Optional[str] = None
     b64_json: Optional[str] = None
     saved_path: Optional[str] = None
+    video_prompt: Optional[str] = None
     error: Optional[str] = None
 
 class SceneImageRequest(BaseModel):
     scene_number: int = Field(..., description="Scene number for organization")
     image_url: str = Field(..., description="URL of the image to process")
     prompt: str = Field(..., description="Text prompt for image editing")
+    video_prompt: str = Field(..., description="Text prompt for video editing")
     size: str = Field(default="1024x1024", description="Image size (1024x1024, 1024x1792, 1792x1024)")
     quality: str = Field(default="high", description="Image quality (standard, high)")
 
@@ -105,6 +111,7 @@ class SceneImageResponse(BaseModel):
     success: bool
     scene_number: Optional[int] = None
     prompt: Optional[str] = None
+    video_prompt: Optional[str] = None
     image_data: Optional[str] = None  # Base64 encoded image data
     error: Optional[str] = None
 
@@ -120,13 +127,22 @@ class RunwayTaskResponse(BaseModel):
     task_id: Optional[str] = None
     status: Optional[str] = None
     progress: Optional[float] = None
-    output: Optional[Dict[str, Any]] = None
+    output: Optional[Any] = None  # Changed from Dict to Any to handle both dict and list
     error: Optional[str] = None
 
 class RunwayVideoDownloadResponse(BaseModel):
     success: bool
     video_url: Optional[str] = None
-    video_data: Optional[str] = None  # Base64 encoded video data
+    download_url: Optional[str] = None  # Local URL to download the video
+    error: Optional[str] = None
+
+class VideoCombineRequest(BaseModel):
+    video_urls: List[str] = Field(..., description="List of video URLs to combine")
+    
+class VideoCombineResponse(BaseModel):
+    success: bool
+    combined_video_path: Optional[str] = None
+    download_url: Optional[str] = None
     error: Optional[str] = None
 
 @router.post("/script", response_model=ScriptResponse)
@@ -304,6 +320,9 @@ async def edit_image_base64_endpoint(request: Base64ImageEditRequest):
                 filename="edited_image.png"
             )
         
+        # Add video_prompt to the result
+        result["video_prompt"] = request.video_prompt
+        
         return result
         
     except Exception as e:
@@ -352,7 +371,8 @@ async def scene_image_endpoint(request: SceneImageRequest):
             "success": True,
             "scene_number": request.scene_number,
             "prompt": request.prompt,
-            "image_data": image_data
+            "image_data": image_data,
+            "video_prompt": request.video_prompt
         }
         
     except Exception as e:
@@ -420,6 +440,10 @@ async def runway_generate_endpoint(request: RunwayMLRequest):
             # Process the response
             response_data = response.json()
             
+            # Print the response data for debugging
+            print("RunwayML API Response:", response_data)
+            print(response_data)
+            
             # Return the result
             result = {
                 "success": True
@@ -428,12 +452,20 @@ async def runway_generate_endpoint(request: RunwayMLRequest):
             # Add task_id if present
             if "taskId" in response_data:
                 result["task_id"] = response_data["taskId"]
+            elif "id" in response_data:
+                result["task_id"] = response_data["id"]
+                
+            # Log the task ID for debugging
+            print(f"Task ID: {result['task_id']}")
             
             # Add URL or data based on what's in the response
             if "url" in response_data:
                 result["result_url"] = response_data["url"]
             if "data" in response_data:
                 result["result_data"] = response_data["data"]
+                
+            # Include the full response for debugging
+            result["raw_response"] = response_data
             
             return result
             
@@ -546,20 +578,46 @@ async def runway_download_video_endpoint(request: RunwayVideoDownloadRequest):
             task_data = status_response.json()
             
             # Check if the task is complete
-            if task_data.get("status") != "COMPLETED":
+            # RunwayML API uses "SUCCEEDED" status instead of "COMPLETED"
+            if task_data.get("status") not in ["COMPLETED", "SUCCEEDED"]:
                 return {
                     "success": False,
                     "error": f"Task is not completed yet. Current status: {task_data.get('status')}"
                 }
             
+            # Print the task data for debugging
+            print("Task data:", task_data)
+            
             # Get the video URL from the output
-            if "output" not in task_data or "video" not in task_data["output"]:
+            if "output" not in task_data:
                 return {
                     "success": False,
-                    "error": "No video output found in the task data"
+                    "error": "No output found in the task data"
                 }
+                
+            # Handle different output formats (array or dictionary)
+            output = task_data["output"]
+            video_url = None
             
-            video_url = task_data["output"]["video"]
+            if isinstance(output, list) and len(output) > 0:
+                # If output is an array, use the first item as the video URL
+                video_url = output[0]
+                print(f"Using array output: {video_url}")
+            elif isinstance(output, dict) and "video" in output:
+                # If output is a dictionary with a video field, use that
+                video_url = output["video"]
+                print(f"Using dictionary output: {video_url}")
+            else:
+                return {
+                    "success": False,
+                    "error": f"Unexpected output format: {output}"
+                }
+                
+            if not video_url:
+                return {
+                    "success": False,
+                    "error": "No video URL found in the output"
+                }
             
             # Create temp directory if it doesn't exist
             os.makedirs("temp", exist_ok=True)
@@ -572,20 +630,20 @@ async def runway_download_video_endpoint(request: RunwayVideoDownloadRequest):
                     "error": f"Error downloading video: {video_response.status_code} - {video_response.text}"
                 }
             
-            # Save the video to a temporary file
-            temp_video_path = f"temp/runway_video_{uuid.uuid4()}.mp4"
+            # Save the video to a temporary file with a more predictable name
+            video_filename = f"runway_video_{request.task_id}.mp4"
+            temp_video_path = f"temp/{video_filename}"
             with open(temp_video_path, "wb") as f:
                 f.write(video_response.content)
             
-            # Convert to base64 for the response
-            with open(temp_video_path, "rb") as f:
-                video_data = base64.b64encode(f.read()).decode("utf-8")
+            # Create a download URL for the video file
+            download_url = f"/download/{video_filename}"
             
             # Return the result
             return {
                 "success": True,
-                "video_url": video_url,
-                "video_data": video_data
+                "video_url": video_url,  # Original RunwayML URL
+                "download_url": download_url  # Local download URL
             }
             
     except Exception as e:
@@ -594,6 +652,51 @@ async def runway_download_video_endpoint(request: RunwayVideoDownloadRequest):
             "error": f"Error downloading video from RunwayML: {str(e)}"
         }
 
+@router.get("/download/{filename}")
+async def download_video(filename: str):
+    """
+    Download a video file by filename.
+    
+    This endpoint serves video files from the temp directory.
+    """
+    try:
+        video_path = f"temp/{filename}"
+        
+        # Check if the file exists
+        if not os.path.exists(video_path):
+            raise HTTPException(status_code=404, detail="Video file not found")
+        
+        # Return the file as a response
+        return FileResponse(
+            path=video_path,
+            filename=filename,
+            media_type="video/mp4"
+        )
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Error downloading video: {str(e)}")
+
+@router.post("/combine-videos", response_model=VideoCombineResponse)
+async def combine_videos_endpoint(request: VideoCombineRequest):
+    """
+    Combine multiple videos in sequence.
+    
+    This endpoint takes a list of video URLs, downloads them, and combines them
+    into a single video in the specified sequence. The combined video is stored
+    in the 'combined_generated_videos' folder and can be accessed via the returned URL.
+    
+    Designed for integration with n8n workflows.
+    """
+    try:
+        # Call the video combiner utility function
+        result = await combine_videos_from_urls(request.video_urls)
+        return result
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Error combining videos: {str(e)}"
+        }
 
 def get_amazon_product_details(url):
     """
