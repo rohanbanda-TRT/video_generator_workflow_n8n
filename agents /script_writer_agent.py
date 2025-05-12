@@ -20,7 +20,7 @@ tools = [
 logger = setup_logging()
 llm = ChatOpenAI(
     temperature=0.7,  # Slightly higher temperature for creative script writing
-    model_name="gpt-4o",
+    model_name="gpt-4o-mini",
     api_key=settings.OPENAI_API_KEY,
 )
 
