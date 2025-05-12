@@ -39,11 +39,22 @@ def add_audio_to_video(video_path: str, audio_path: str, output_path: str = None
             return {"success": False, "error": f"Input audio does not exist: {audio_path}"}
             
         # Generate output path if not provided
-        if output_path is None:
+        if output_path is None or output_path.strip() == "":
             video_dir = os.path.dirname(video_path)
             video_name = os.path.basename(video_path)
             video_name_without_ext, video_ext = os.path.splitext(video_name)
             output_path = os.path.join(video_dir, f"{video_name_without_ext}_with_audio{video_ext}")
+            
+        # Ensure output_path is not empty and has a valid extension
+        if not output_path or output_path.strip() == "":
+            logger.error("Output path is empty")
+            return {"success": False, "error": "Output path is empty"}
+            
+        # Ensure output path has a valid extension
+        if not os.path.splitext(output_path)[1]:
+            # If no extension, use the same as input video
+            _, video_ext = os.path.splitext(video_path)
+            output_path = f"{output_path}{video_ext}"
         
         # Ensure output directory exists
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
@@ -61,6 +72,7 @@ def add_audio_to_video(video_path: str, audio_path: str, output_path: str = None
             output_path
         ]
         
+        # Log the full command for debugging
         logger.info(f"Running FFmpeg command: {' '.join(cmd)}")
         
         # Run the FFmpeg command

@@ -12,6 +12,13 @@ from fastapi.responses import FileResponse
 from bs4 import BeautifulSoup
 from app.utils.video_combiner import combine_videos_from_urls
 from langchain_core.messages import HumanMessage
+import sys
+import os.path
+
+# Add the project root to sys.path to allow importing from the root directory
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from add_audio_to_video import add_audio_to_video
+from text_to_speech import generate_audio_from_text
 
 from app.agents.script_writer_agent import script_writer_agent
 from app.utils.image_editor import edit_image
@@ -143,6 +150,34 @@ class VideoCombineResponse(BaseModel):
     success: bool
     combined_video_path: Optional[str] = None
     download_url: Optional[str] = None
+    error: Optional[str] = None
+
+class AudioToVideoRequest(BaseModel):
+    video_path: str = Field(..., description="Path to the input video file")
+    audio_path: str = Field(..., description="Path to the audio file to add")
+    output_path: Optional[str] = Field(default=None, description="Path where the output video should be saved (optional)")
+    output_name: Optional[str] = Field(default=None, description="Custom name for the output file in the response (optional)")
+
+class AudioToVideoResponse(BaseModel):
+    success: bool
+    output_path: Optional[str] = None
+    download_url: Optional[str] = None
+    error: Optional[str] = None
+
+class TextToSpeechRequest(BaseModel):
+    text: str = Field(..., description="Text to convert to speech")
+    voice: str = Field(default="alloy", description="Voice to use (alloy, echo, fable, onyx, nova, shimmer)")
+    model: str = Field(default="tts-1", description="TTS model to use (tts-1, tts-1-hd)")
+    output_format: str = Field(default="mp3", description="Format of the output audio file (mp3, opus, aac, flac)")
+    speed: float = Field(default=1.0, description="Speed of the audio (0.25 to 4.0)")
+
+class TextToSpeechResponse(BaseModel):
+    success: bool
+    output_path: Optional[str] = None
+    download_url: Optional[str] = None
+    voice: Optional[str] = None
+    model: Optional[str] = None
+    format: Optional[str] = None
     error: Optional[str] = None
 
 @router.post("/script", response_model=ScriptResponse)
@@ -652,25 +687,42 @@ async def runway_download_video_endpoint(request: RunwayVideoDownloadRequest):
             "error": f"Error downloading video from RunwayML: {str(e)}"
         }
 
-@router.get("/download/{filename}")
-async def download_video(filename: str):
+@router.get("/download/{filename:path}")
+async def download_file(filename: str):
     """
-    Download a video file by filename.
+    Download a file by filename.
     
-    This endpoint serves video files from the temp directory.
+    This endpoint serves files from the temp directory and its subdirectories.
+    It automatically detects the appropriate media type based on file extension.
     """
     try:
-        video_path = f"temp/{filename}"
+        # Construct the file path, ensuring no path traversal attacks
+        safe_filename = os.path.normpath(filename).lstrip('/\\')
+        file_path = os.path.join("temp", safe_filename)
         
         # Check if the file exists
-        if not os.path.exists(video_path):
-            raise HTTPException(status_code=404, detail="Video file not found")
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+        
+        # Determine media type based on file extension
+        _, ext = os.path.splitext(filename)
+        media_type = "application/octet-stream"  # Default
+        
+        # Map common extensions to media types
+        if ext.lower() in [".mp4", ".mov", ".avi"]:
+            media_type = "video/mp4"
+        elif ext.lower() in [".mp3", ".wav", ".ogg"]:
+            media_type = f"audio/{ext.lower()[1:]}"
+        elif ext.lower() in [".jpg", ".jpeg"]:
+            media_type = "image/jpeg"
+        elif ext.lower() == ".png":
+            media_type = "image/png"
         
         # Return the file as a response
         return FileResponse(
-            path=video_path,
-            filename=filename,
-            media_type="video/mp4"
+            path=file_path,
+            filename=os.path.basename(filename),
+            media_type=media_type
         )
     except Exception as e:
         if isinstance(e, HTTPException):
@@ -762,3 +814,137 @@ def get_amazon_product_details(url):
         "product_details": details,
         "images": image_urls,
     }
+
+@router.post("/add-audio-to-video", response_model=AudioToVideoResponse)
+async def add_audio_to_video_endpoint(request: AudioToVideoRequest):
+    """
+    Add audio to a video file using FFmpeg.
+    
+    This endpoint combines an audio file with a video file, replacing any existing audio.
+    It uses FFmpeg to process the files and returns a path to the resulting video.
+    
+    The audio generated from OpenAI or other sources in the n8n workflow can be combined
+    with the video using this endpoint.
+    
+    Args:
+        video_path: Path to the input video file
+        audio_path: Path to the audio file to add
+        output_path: Optional path where the output video should be saved
+        
+    Returns:
+        A response containing the success status, output path, and download URL
+    """
+    try:
+        # Call the add_audio_to_video function
+        result = add_audio_to_video(request.video_path, request.audio_path, request.output_path)
+        
+        if not result["success"]:
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error adding audio to video")
+            }
+        
+        # Get the output path from the result
+        output_path = result["output_path"]
+        
+        # Create a download URL for the video file
+        video_filename = os.path.basename(output_path)
+        
+        # Create a symlink in the temp directory if the file is not already there
+        if not output_path.startswith("temp/"):
+            os.makedirs("temp", exist_ok=True)
+            temp_path = f"temp/{video_filename}"
+            
+            # Create a copy or symlink to the output file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+                
+            # Copy the file to temp directory for easier access
+            with open(output_path, "rb") as src_file, open(temp_path, "wb") as dst_file:
+                dst_file.write(src_file.read())
+                
+            output_path = temp_path
+        
+        # Create a download URL
+        download_url = f"/download/{video_filename}"
+        
+        # Use custom output name in the response if provided
+        response_output_path = output_path
+        if request.output_name:
+            # Just rename in the response, don't change the actual file
+            response_output_path = request.output_name
+        
+        return {
+            "success": True,
+            "output_path": response_output_path,
+            "download_url": download_url
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Error adding audio to video: {str(e)}"
+        }
+
+@router.post("/generate-speech", response_model=TextToSpeechResponse)
+async def generate_speech_endpoint(request: TextToSpeechRequest):
+    """
+    Generate audio from text using OpenAI's text-to-speech API.
+    
+    This endpoint converts text to speech using OpenAI's API and returns a path to the resulting audio file.
+    The generated audio can then be used with the add-audio-to-video endpoint to create narrated videos.
+    
+    Args:
+        text: The text to convert to speech
+        voice: The voice to use (alloy, echo, fable, onyx, nova, shimmer)
+        model: The TTS model to use (tts-1, tts-1-hd)
+        output_format: Format of the output audio file (mp3, opus, aac, flac)
+        speed: Speed of the audio (0.25 to 4.0)
+        
+    Returns:
+        A response containing the success status, output path, and download URL
+    """
+    try:
+        # Call the generate_audio_from_text function
+        result = generate_audio_from_text(
+            text=request.text,
+            voice=request.voice,
+            model=request.model,
+            output_format=request.output_format,
+            speed=request.speed,
+            # Use None for output_path to let the function generate a unique path
+            output_path=None
+        )
+        
+        if not result["success"]:
+            return {
+                "success": False,
+                "error": result.get("error", "Unknown error generating speech")
+            }
+        
+        # Get the output path from the result
+        output_path = result["output_path"]
+        
+        # Get the relative path from the temp directory
+        if output_path.startswith("temp/"):
+            relative_path = output_path[5:]  # Remove 'temp/' prefix
+        else:
+            relative_path = os.path.basename(output_path)
+        
+        # Create a download URL
+        download_url = f"/download/{relative_path}"
+        
+        return {
+            "success": True,
+            "output_path": output_path,
+            "download_url": download_url,
+            "voice": result.get("voice"),
+            "model": result.get("model"),
+            "format": result.get("format")
+        }
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": f"Error generating speech: {str(e)}"
+        }
