@@ -50,7 +50,6 @@ coverage/
 
 # Ignore Git-related files
 .git/
-.gitignore
 
 # Ignore macOS system files
 *.DS_Store
